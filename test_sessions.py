@@ -195,6 +195,59 @@ class IndexTest(Base):
         self.assertEqual(sessions.cached(self.old)[0]["messageCount"], 2)
 
 
+class ListTest(Base):
+    def by_id(self):
+        return {s["id"]: s for s in sessions.list_sessions()}
+
+    def test_flags_default(self):
+        self.session()
+        s = self.by_id()[SID]
+        self.assertEqual({k: s[k] for k in ("star", "note", "archived", "archiveOnly", "trashed", "live")},
+                         {"star": False, "note": "", "archived": False, "archiveOnly": False, "trashed": False, "live": False})
+
+    def test_meta_and_archive_reflected(self):
+        self.session()
+        sessions.set_meta(SID, star=True, note="중요")
+        sessions.archive(SID)
+        s = self.by_id()[SID]
+        self.assertEqual((s["star"], s["note"], s["archived"]), (True, "중요", True))
+
+    def test_live_flag(self):
+        self.session(age=0)
+        self.assertTrue(self.by_id()[SID]["live"])
+
+    def test_archive_refreshed_when_original_changes(self):
+        p = self.session()
+        sessions.archive(SID)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(user("추가된 대화", "2026-09-02T10:00:00Z"), ensure_ascii=False) + "\n")
+        sessions.list_sessions()
+        self.assertIn("추가된 대화", sessions.bundle_jsonl("archive", SID).read_text(encoding="utf-8"))
+
+    def test_archive_only_after_original_removed(self):
+        p = self.session()
+        sessions.archive(SID)
+        p.unlink()
+        s = self.by_id()[SID]
+        self.assertEqual((s["archiveOnly"], s["archived"]), (True, True))
+        self.assertEqual(sessions.locate(SID), sessions.bundle_jsonl("archive", SID))
+        self.assertEqual([h["id"] for h in sessions.search("관리")], [SID])
+
+    def test_trashed_listed_but_not_searched(self):
+        self.session()
+        sessions.trash(SID)
+        self.assertTrue(self.by_id()[SID]["trashed"])
+        self.assertEqual(sessions.locate(SID), sessions.bundle_jsonl("trash", SID))
+        self.assertEqual(sessions.search("관리"), [])
+
+    def test_trash_wins_over_archive(self):
+        self.session()
+        sessions.archive(SID)
+        sessions.trash(SID)
+        s = self.by_id()[SID]
+        self.assertEqual((s["trashed"], s["archiveOnly"], s["archived"]), (True, False, True))
+
+
 class StoreTest(Base):
     def rels(self, sid=SID, project="-Users-jun-dev-demo"):
         return [Path("projects") / project / f"{sid}.jsonl", Path("projects") / project / sid / "tool-results" / "r.txt",

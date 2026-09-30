@@ -111,8 +111,36 @@ def cached(path):
 
 
 def list_sessions():
-    found = [s for p in (CLAUDE_DIR / "projects").glob("*/*.jsonl") if (s := cached(p)[0])]
-    return sorted(found, key=lambda s: s["end"] or "", reverse=True)
+    meta, out = read_meta(), {}
+    archived = {d.name for d in (STORE_DIR / "archive").glob("*")}
+    for p in (CLAUDE_DIR / "projects").glob("*/*.jsonl"):
+        s = cached(p)[0]
+        if not s:
+            continue
+        if s["id"] in archived:
+            copy = bundle_jsonl("archive", s["id"])
+            try:
+                if copy and p.stat().st_mtime > copy.stat().st_mtime:
+                    archive(s["id"])
+            except (OSError, NotFound):
+                pass  # 갱신에 실패해도 목록은 보여줘야 함. 다음 조회 때 다시 시도
+        out[s["id"]] = {**s, "archiveOnly": False, "trashed": False, "live": is_live(p)}
+    # 휴지통을 먼저 봐서, 지운 세션이 보관본 때문에 목록에 다시 나타나지 않게 함
+    for kind in ("trash", "archive"):
+        for d in (STORE_DIR / kind).glob("*"):
+            j = UUID_RE.fullmatch(d.name) and d.name not in out and bundle_jsonl(kind, d.name)
+            if j and (s := cached(j)[0]):
+                out[s["id"]] = {**s, "archiveOnly": kind == "archive", "trashed": kind == "trash", "live": False}
+    for s in out.values():
+        m = meta.get(s["id"], {})
+        s.update(star=bool(m.get("star")), note=m.get("note", ""), archived=s["id"] in archived)
+    return sorted(out.values(), key=lambda s: s["end"] or "", reverse=True)
+
+
+def locate(sid):
+    if not UUID_RE.fullmatch(sid):
+        return None
+    return find_path(sid) or bundle_jsonl("archive", sid) or bundle_jsonl("trash", sid)
 
 
 def find_path(sid):
@@ -126,11 +154,11 @@ def search(q):
     if not q:
         return []
     hits = []
-    for p in (CLAUDE_DIR / "projects").glob("*/*.jsonl"):
-        summary, _, hay = cached(p)
+    for s in list_sessions():
+        hay = "" if s["trashed"] else cached(locate(s["id"]))[2]
         i = hay.find(q)
-        if summary and i >= 0:
-            hits.append({"id": summary["id"], "snippet": hay[max(0, i - 40): i + len(q) + 40]})
+        if i >= 0:
+            hits.append({"id": s["id"], "snippet": hay[max(0, i - 40): i + len(q) + 40]})
     return hits
 
 
@@ -277,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/sessions":
             return self.reply_json(list_sessions())
         if url.path.startswith("/api/session/"):
-            path = find_path(url.path.removeprefix("/api/session/"))
+            path = locate(url.path.removeprefix("/api/session/"))
             return self.reply_json(cached(path)[1]) if path else self.reply_json({"error": "not found"}, 404)
         if url.path == "/api/search":
             return self.reply_json(search(parse_qs(url.query).get("q", [""])[0]))
