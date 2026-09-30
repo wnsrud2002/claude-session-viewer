@@ -28,7 +28,16 @@ Claude Code 가 <code>~/.claude/projects/</code> 에 남기는 세션 기록을<
 
 ## 설치
 
-### macOS 앱
+### 릴리스에서 받기
+
+필요한 것: macOS 13 이상 (Apple Silicon · Intel), Command Line Tools (`xcode-select --install` — 앱이 `/usr/bin/python3` 로 서버를 띄웁니다)
+
+1. [Releases](https://github.com/wnsrud2002/claude-session-viewer/releases/latest) 에서 `Session-Viewer-*-macOS.zip` 을 받아 풀고, `Session Viewer.app` 을 `응용 프로그램` 폴더로 옮깁니다.
+2. Apple 공증을 받지 않은 앱이라 처음 열 때 macOS 가 막습니다. 아래 중 하나로 한 번만 허용하면 됩니다.
+   - 앱을 연 뒤 **시스템 설정 → 개인정보 보호 및 보안** 아래쪽의 **그래도 열기**
+   - 또는 터미널에서 `xattr -dr com.apple.quarantine "/Applications/Session Viewer.app"`
+
+### 소스에서 빌드 (macOS 앱)
 
 필요한 것: macOS 13 이상, Xcode 또는 Command Line Tools (`xcode-select --install`)
 
