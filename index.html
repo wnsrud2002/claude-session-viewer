@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Session Viewer</title>
-<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
 <style>
 :root { color-scheme:dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#9da7b3; --faint:#7d8590;
   --accent:#56d364; --star:#e3b341; --danger:#ff7b72; --sel:#1f2937;
@@ -56,10 +55,19 @@ main { display:grid; grid-template-columns:minmax(0, 380px) minmax(0, 1fr); min-
 #right { min-height:0; display:grid; grid-template-rows:auto 1fr; }
 #tabs { display:flex; gap:6px; padding:6px 12px; border-bottom:1px solid var(--line); }
 #tabs button.on { color:var(--accent); border-color:var(--accent); }
-#map, #flow { min-height:0; overflow:auto; }
-#map svg { display:block; }
-#map circle.twinkle { animation:twinkle 2.4s ease-in-out infinite; filter:drop-shadow(0 0 3px var(--accent)); }
-#map circle.star { filter:drop-shadow(0 0 4px var(--star)); }
+#grid, #flow { min-height:0; overflow:auto; }
+#grid { padding:12px 16px; }
+.grow { display:grid; grid-template-columns:var(--cols); gap:2px; align-items:center; min-height:18px; }
+.grow.head { color:var(--faint); font-size:11px; margin-bottom:4px; }
+/* 날짜 글자는 칸보다 넓으므로 오른쪽 끝을 칸에 맞추고 왼쪽 빈 칸으로 넘치게 함 (끝 날짜가 '세션' 열을 덮지 않게) */
+.tick { display:flex; justify-content:flex-end; white-space:nowrap; }
+.pname { background:none; border:0; padding:0 8px 0 0; text-align:left; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg); }
+.pname.on { color:var(--accent); }
+.cell { height:14px; border-radius:2px; }
+.cell.has { cursor:pointer; }
+.cell.on { outline:1px solid var(--fg); }
+.cell.mine { outline:2px solid var(--accent); outline-offset:1px; }
+.num, .ago { text-align:right; color:var(--dim); font-size:12px; }
 #flow { padding:14px 18px; }
 .resume { display:flex; gap:8px; align-items:center; padding:6px 10px; background:var(--panel); border:1px solid var(--line); }
 .resume code { flex:1; overflow-x:auto; white-space:nowrap; font:inherit; }
@@ -89,8 +97,7 @@ dialog pre { margin:0 0 12px; font:inherit; }
 #toast { position:fixed; left:50%; bottom:44px; transform:translateX(-50%); padding:6px 14px;
   background:var(--panel); border:1px solid var(--accent); display:flex; gap:10px; align-items:center; }
 @keyframes blink { 50% { opacity:0; } }
-@keyframes twinkle { 50% { opacity:.35; } }
-@media (prefers-reduced-motion: reduce) { .cursor, #map circle.twinkle { animation:none; } }
+@media (prefers-reduced-motion: reduce) { .cursor { animation:none; } }
 @media (max-width:760px) {
   main { grid-template-columns:1fr; grid-template-rows:40vh 1fr; }
   #list { border-right:0; border-bottom:1px solid var(--line); }
@@ -109,8 +116,8 @@ dialog pre { margin:0 0 12px; font:inherit; }
 <main>
   <ul id="list"></ul>
   <section id="right">
-    <nav id="tabs"><button data-tab="map" class="on">지도</button><button data-tab="flow">대화 흐름</button></nav>
-    <div id="map"></div>
+    <nav id="tabs"><button data-tab="grid" class="on">프로젝트</button><button data-tab="flow">대화 흐름</button></nav>
+    <div id="grid"></div>
     <div id="flow" hidden><p class="empty">세션을 선택하세요</p></div>
   </section>
 </main>
@@ -235,7 +242,7 @@ function render() {
   renderHeat();
   renderCards(list);
   renderList(list);
-  renderMap(list);
+  renderGrid();
   renderBulk();
 }
 
@@ -248,7 +255,7 @@ async function reload() {
 function focusRow(id) {
   state.selected = id;
   renderList(filtered());
-  d3.selectAll('#map circle').style('stroke', d => d.id === id ? 'var(--fg)' : 'none');
+  renderGrid();
   document.querySelector(`#list li[data-id="${id}"]`)?.scrollIntoView({ block: 'nearest' });
 }
 
@@ -260,58 +267,83 @@ function select(id) {
 
 function showTab(name) {
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
-  $('#map').hidden = name !== 'map';
+  $('#grid').hidden = name !== 'grid';
   $('#flow').hidden = name !== 'flow';
-  if (name === 'map') renderMap(filtered());
+  if (name === 'grid') renderGrid();
 }
 $('#tabs').onclick = e => e.target.dataset.tab && showTab(e.target.dataset.tab);
 
-let sim;
-function renderMap(list) {
-  const box = $('#map');
+const ago = t => {
+  const d = Math.floor((Date.now() - t) / DAY);
+  return d <= 0 ? '오늘' : d === 1 ? '어제' : `${d}일 전`;
+};
+
+function pickCell(project, day) {
+  const same = state.day === day && state.projects.size === 1 && state.projects.has(project);
+  state.day = same ? null : day;
+  state.projects = same ? new Set() : new Set([project]);
+  renderProjects();
+  render();
+}
+
+function toggleProject(name) {
+  state.projects.has(name) ? state.projects.delete(name) : state.projects.add(name);
+  renderProjects();
+  render();
+}
+
+function renderGrid() {
+  const box = $('#grid');
   if (box.hidden) return;
-  sim?.stop();
-  if (!list.length) return box.replaceChildren(el('p', { className: 'empty', textContent: '표시할 세션이 없습니다' }));
-  const { width: W, height: H } = box.getBoundingClientRect();
-  const now = Date.now(), oldest = Math.min(now - DAY, ...list.map(s => Date.parse(s.start)));
-  const nodes = [
-    ...[...new Set(list.map(s => s.project))].map(p => ({ id: 'p:' + p, label: p, r: 18, project: true })),
-    ...list.map(s => ({ id: s.id, label: s.title, r: Math.min(24, 4 + Math.sqrt(s.messageCount) * 1.5), s })),
-  ];
-  const links = list.map(s => ({ source: 'p:' + s.project, target: s.id }));
-  const svg = d3.create('svg').attr('viewBox', [0, 0, W, H]).attr('width', W).attr('height', H);
-  const link = svg.append('g').style('stroke', 'var(--line)').selectAll('line').data(links).join('line');
-  // SVG 속성(fill=) 에는 CSS 변수가 안 먹어서 색은 전부 style 로 지정
-  const node = svg.append('g').selectAll('circle').data(nodes).join('circle')
-    .attr('r', d => d.r)
-    .attr('class', d => d.project ? '' : [d.s.star && 'star', now - Date.parse(d.s.end) < 7 * DAY && 'twinkle'].filter(Boolean).join(' '))
-    .style('fill', d => d.project ? 'var(--faint)' : d.s.star ? 'var(--star)' : 'var(--accent)')
-    .style('fill-opacity', d => d.project ? 0.5 : 0.25 + 0.75 * (Date.parse(d.s.start) - oldest) / (now - oldest))
-    .style('stroke', d => d.id === state.selected ? 'var(--fg)' : 'none')
-    .style('stroke-width', 2)
-    .style('cursor', d => d.project ? 'grab' : 'pointer')
-    .on('click', (e, d) => d.project || select(d.id))
-    .call(d3.drag()
-      .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = d.fy = null; }));
-  node.append('title').text(d => d.project ? d.label : `${d.label}\n${dayKey(d.s.start)} · 메시지 ${d.s.messageCount}`);
-  const label = svg.append('g').selectAll('text').data(nodes.filter(d => d.project)).join('text')
-    .text(d => d.label).attr('font-size', 11).attr('text-anchor', 'middle').attr('dy', -22).style('fill', 'var(--dim)');
-  sim = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d => d.id).distance(40))
-    .force('charge', d3.forceManyBody().strength(-30))
-    .force('collide', d3.forceCollide(d => d.r + 1))
-    .force('center', d3.forceCenter(W / 2, H / 2))
-    // 프로젝트 무리끼리는 링크가 없어 서로 밀어내며 화면 밖으로 흩어지므로 중앙으로 당김
-    .force('x', d3.forceX(W / 2).strength(0.08))
-    .force('y', d3.forceY(H / 2).strength(0.08))
-    .on('tick', () => {
-      link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-      node.attr('cx', d => d.x).attr('cy', d => d.y);
-      label.attr('x', d => d.x).attr('y', d => d.y);
+  // 프로젝트 필터를 걸어도 다른 줄을 다시 고를 수 있도록 보기·검색 조건만 적용 (고른 줄은 강조로 표시)
+  const base = state.sessions.filter(s => s.start && VIEWS[state.view][1](s) && (!state.hits || state.hits.has(s.id)));
+  if (!base.length) return box.replaceChildren(el('p', { className: 'empty', textContent: '표시할 세션이 없습니다' }));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const span = Math.ceil((today - Math.min(...base.map(s => Date.parse(s.start)))) / DAY) + 1;
+  const n = state.days || Math.min(90, Math.max(7, span));
+  // 서머타임이 있는 지역에서도 날짜가 밀리지 않도록 ms 대신 달력 날짜로 뒤로 셈
+  const days = Array.from({ length: n }, (_, i) => {
+    const d = new Date(today);
+    d.setDate(d.getDate() - (n - 1 - i));
+    return dayKey(d);
+  });
+  const inRange = new Set(days), byProj = new Map();
+  for (const s of base) {
+    const k = dayKey(s.start);
+    if (!inRange.has(k)) continue;
+    if (!byProj.has(s.project)) byProj.set(s.project, { cells: {}, count: 0, last: 0 });
+    const p = byProj.get(s.project);
+    (p.cells[k] ??= []).push(s);
+    p.count++;
+    p.last = Math.max(p.last, Date.parse(s.end || s.start));
+  }
+  if (!byProj.size) return box.replaceChildren(el('p', { className: 'empty', textContent: '이 기간에 표시할 세션이 없습니다' }));
+  const max = Math.max(1, ...[...byProj.values()].flatMap(p => Object.values(p.cells).map(c => c.length)));
+  const sel = state.selected && byId(state.selected);
+  box.style.setProperty('--cols', `minmax(90px, 170px) repeat(${n}, minmax(6px, 1fr)) 3em 5em`);
+  const head = el('div', { className: 'grow head' }, el('span', { textContent: '프로젝트' }),
+    ...days.map((k, i) => el('span', { className: 'tick', textContent: n <= 14 || (n - 1 - i) % 7 === 0 ? `${+k.slice(5, 7)}/${+k.slice(8)}` : '' })),
+    el('span', { className: 'num', textContent: '세션' }), el('span', { className: 'ago', textContent: '최근' }));
+  const rows = [...byProj].sort((a, b) => b[1].last - a[1].last).map(([name, p]) => {
+    const label = el('button', { className: 'pname', textContent: name, title: name, onclick: () => toggleProject(name) });
+    label.classList.toggle('on', state.projects.has(name));
+    const cells = days.map(k => {
+      const ss = p.cells[k] || [];
+      const c = el('div', { className: 'cell', title: `${name} · ${k}: 세션 ${ss.length}개` + ss.map(s => '\n· ' + s.title).join('') });
+      c.style.background = `var(--h${ss.length ? Math.ceil(ss.length / max * 4) : 0})`;
+      c.classList.toggle('on', state.day === k && state.projects.has(name));
+      c.classList.toggle('mine', !!sel && sel.project === name && dayKey(sel.start) === k);
+      if (ss.length) {
+        c.classList.add('has');
+        c.onclick = () => pickCell(name, k);
+      }
+      return c;
     });
-  box.replaceChildren(svg.node());
+    return el('div', { className: 'grow' }, label, ...cells,
+      el('span', { className: 'num', textContent: p.count }), el('span', { className: 'ago', textContent: ago(p.last) }));
+  });
+  box.replaceChildren(head, ...rows);
 }
 
 const fmtGap = ms => ms < 36e5 ? Math.round(ms / 6e4) + '분' : (ms / 36e5).toFixed(1) + '시간';
