@@ -67,8 +67,10 @@ def load(path):
             cost = r
         cwd = cwd or r.get("cwd")
         message = r.get("message") if isinstance(r.get("message"), dict) else {}
-        if kind == "assistant" and message.get("usage") and message.get("id") not in seen:
-            seen.add(message.get("id"))  # 한 응답이 블록별로 여러 줄에 나뉘며 같은 usage 를 반복함
+        mid = message.get("id")
+        # 한 응답이 블록별로 여러 줄에 나뉘며 같은 usage 를 반복하므로 id 로 한 번만 셈 (id 가 없으면 구분할 수 없어 모두 셈)
+        if kind == "assistant" and message.get("usage") and (not mid or mid not in seen):
+            seen.add(mid)
             tokens += sum(message["usage"].get(k) or 0 for k in USAGE_KEYS)
         if m := to_message(r):
             msgs.append(m)
@@ -132,7 +134,8 @@ def list_sessions():
             if j and (s := cached(j)[0]):
                 out[s["id"]] = {**s, "archiveOnly": kind == "archive", "trashed": kind == "trash", "live": False}
     for s in out.values():
-        m = meta.get(s["id"], {})
+        m = meta.get(s["id"])
+        m = m if isinstance(m, dict) else {}  # 손으로 고친 meta.json 의 이상한 항목 하나로 목록 전체가 죽지 않게
         s.update(star=bool(m.get("star")), note=m.get("note", ""), archived=s["id"] in archived)
     return sorted(out.values(), key=lambda s: s["end"] or "", reverse=True)
 
@@ -293,7 +296,8 @@ def set_meta(sid, **fields):
         meta = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
         if not isinstance(meta, dict):
             raise ValueError("meta.json 형식이 올바르지 않습니다")
-        meta[sid] = {**meta.get(sid, {}), **fields}
+        old = meta.get(sid)
+        meta[sid] = {**(old if isinstance(old, dict) else {}), **fields}
         f.parent.mkdir(parents=True, exist_ok=True)
         tmp = f.with_suffix(".tmp")
         tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")

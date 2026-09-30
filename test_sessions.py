@@ -121,6 +121,15 @@ class LoadTest(Base):
                         asst([{"type": "text", "text": "b"}], "2026-09-01T10:00:03Z", "msg_2", u)])
         self.assertEqual(sessions.load(p)[0]["tokens"], 230)
 
+    def test_tokens_without_message_id_all_counted(self):
+        u = {"output_tokens": 5}
+        p = self.write([user("hi", "2026-09-01T10:00:00Z"),
+                        rec("assistant", timestamp="2026-09-01T10:00:01Z",
+                            message={"role": "assistant", "content": [{"type": "text", "text": "a"}], "usage": u}),
+                        rec("assistant", timestamp="2026-09-01T10:00:02Z",
+                            message={"role": "assistant", "content": [{"type": "text", "text": "b"}], "usage": u})])
+        self.assertEqual(sessions.load(p)[0]["tokens"], 10)
+
     def test_meta_only_session_has_no_summary(self):
         p = self.write([rec("mode", mode="default"), rec("ai-title", aiTitle="빈 세션")])
         self.assertEqual(sessions.load(p), (None, [], ""))
@@ -396,6 +405,14 @@ class StoreTest(Base):
             sessions.set_meta(SID, star=True)
         self.assertEqual((self.store / "meta.json").read_text(), "{broken")
         self.assertEqual(sessions.read_meta(), {})
+
+    def test_non_dict_meta_entry_ignored(self):
+        self.session()
+        self.store.mkdir()
+        (self.store / "meta.json").write_text(json.dumps({SID: "x"}))
+        s = sessions.list_sessions()[0]
+        self.assertEqual((s["star"], s["note"]), (False, ""))
+        self.assertEqual(sessions.set_meta(SID, star=True), {"star": True})
 
     def test_history_jsonl_untouched(self):
         h = self.claude / "history.jsonl"
