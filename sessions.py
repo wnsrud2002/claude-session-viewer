@@ -17,7 +17,7 @@ TEXT_LIMIT = 10_000  # ponytail: 긴 메시지는 잘라서 전송, 전문 보�
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
-PORT = 8765
+PORT = int(os.environ.get("SV_PORT", 8765))
 LIVE_SECONDS = 300
 
 
@@ -390,6 +390,16 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def watch_parent():
+    # 앱이 강제 종료되면 종료 처리가 불리지 않으므로, 부모가 바뀌면(고아가 되면) 스스로 끝냄
+    parent = os.getppid()
+    while os.getppid() == parent:
+        time.sleep(2)
+    os._exit(0)
+
+
 if __name__ == "__main__":
+    if os.environ.get("SV_WATCH_PARENT") == "1":
+        threading.Thread(target=watch_parent, daemon=True).start()
     print(f"http://127.0.0.1:{PORT}")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

@@ -1,6 +1,10 @@
 import json
 import os
 import shutil
+import signal
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -517,6 +521,48 @@ class HttpTest(Base):
         self.assertEqual(self.post(f"/api/session/{SID}/explode")[0], 404)
         self.assertEqual(self.post("/api/session/../../x/trash")[0], 404)
         self.assertEqual(self.post("/api/session/not-a-uuid/archive")[0], 404)
+
+
+class LifecycleTest(unittest.TestCase):
+    def wait_http(self, port, want_up, seconds=8):
+        for _ in range(int(seconds / 0.2)):
+            try:
+                c = HTTPConnection("127.0.0.1", port, timeout=1)
+                c.request("GET", "/api/search", headers={"Host": f"127.0.0.1:{port}"})
+                up = c.getresponse().status == 200
+                c.close()
+            except OSError:
+                up = False
+            if up == want_up:
+                return True
+            time.sleep(0.2)
+        return False
+
+    def test_server_uses_sv_port_and_exits_when_parent_dies(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "SV_PORT": str(port), "SV_WATCH_PARENT": "1",
+                   "SV_CLAUDE_DIR": tmp, "SV_STORE_DIR": tmp}
+            # 앱 역할을 하는 중간 프로세스가 서버를 띄우고 자기 pid 를 알려준 뒤 대기
+            parent = subprocess.Popen(
+                [sys.executable, "-c",
+                 "import subprocess, sys, time; p = subprocess.Popen([sys.executable, sys.argv[1]], "
+                 "stdout=subprocess.DEVNULL); print(p.pid, flush=True); time.sleep(60)",
+                 sessions.__file__], env=env, stdout=subprocess.PIPE, text=True)
+            child = int(parent.stdout.readline())
+            try:
+                self.assertTrue(self.wait_http(port, True), "SV_PORT 로 서버가 뜨지 않음")
+                parent.kill()
+                parent.wait()
+                self.assertTrue(self.wait_http(port, False), "부모가 죽었는데 서버가 남아 있음")
+            finally:
+                parent.kill()
+                try:
+                    os.kill(child, signal.SIGTERM)  # 실패한 경우에도 서버가 남지 않게 정리
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == "__main__":

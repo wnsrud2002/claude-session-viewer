@@ -6,7 +6,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
     var window: NSWindow!
     var web: WKWebView!
     var server: Process?
-    let url = URL(string: "http://127.0.0.1:8765")!
+    // 8765 를 이미 쓰는 다른(오래된) 서버에 붙지 않도록 앱마다 빈 포트를 새로 받음
+    let port = freePort()
+    var url: URL { URL(string: "http://127.0.0.1:\(port)")! }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMenu()
@@ -28,9 +30,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         p.arguments = [Bundle.main.path(forResource: "sessions", ofType: "py")!]
-        // ponytail: 포트 8765 가 이미 쓰이면 기존 서버에 붙음. 여러 인스턴스가 필요해지면 빈 포트를 골라 SV_PORT 로 전달
-        try? p.run()
+        // SV_WATCH_PARENT: 앱이 강제 종료돼도 서버가 고아로 남지 않게 서버 스스로 부모를 지켜봄
+        p.environment = ProcessInfo.processInfo.environment.merging(
+            ["SV_PORT": String(port), "SV_WATCH_PARENT": "1"]) { $1 }
+        do {
+            try p.run()
+        } catch {
+            fail("서버를 실행하지 못했습니다", error.localizedDescription)
+        }
         server = p
+    }
+
+    func fail(_ title: String, _ detail: String) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = detail
+        a.runModal()
+        NSApp.terminate(nil)
     }
 
     func waitForServer(tries: Int, then done: @escaping () -> Void) {
@@ -38,14 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
             DispatchQueue.main.async {
                 if (resp as? HTTPURLResponse)?.statusCode == 200 {
                     done()
+                } else if let s = self.server, !s.isRunning {
+                    self.fail("서버가 바로 종료됐습니다", "종료 코드 \(s.terminationStatus)")
                 } else if tries > 0 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.waitForServer(tries: tries - 1, then: done) }
                 } else {
-                    let a = NSAlert()
-                    a.messageText = "서버를 시작하지 못했습니다"
-                    a.informativeText = "/usr/bin/python3 가 있는지 확인하세요."
-                    a.runModal()
-                    NSApp.terminate(nil)
+                    self.fail("서버를 시작하지 못했습니다", "/usr/bin/python3 가 있는지 확인하세요.")
                 }
             }
         }.resume()
@@ -92,6 +106,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
         submenu("보기", [("새로고침", #selector(reload), "r")])
         NSApp.mainMenu = main
     }
+}
+
+func freePort() -> Int {
+    // ponytail: 포트를 확인하고 닫은 뒤 서버가 여는 사이에 다른 프로그램이 가로챌 수 있음. 그러면 "서버가 바로 종료됐습니다" 경고로 드러남
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    defer { close(fd) }
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+    withUnsafeMutablePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            _ = bind(fd, $0, len)
+            _ = getsockname(fd, $0, &len)
+        }
+    }
+    return Int(UInt16(bigEndian: addr.sin_port))
 }
 
 let app = NSApplication.shared
