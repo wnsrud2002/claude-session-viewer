@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -240,6 +241,31 @@ class ListTest(Base):
         self.assertEqual(sessions.locate(SID), sessions.bundle_jsonl("trash", SID))
         self.assertEqual(sessions.search("관리"), [])
 
+    def test_failed_refresh_keeps_previous_archive(self):
+        p = self.session()
+        sessions.archive(SID)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(user("새 대화", "2026-09-02T10:00:00Z"), ensure_ascii=False) + "\n")
+        with mock.patch.object(sessions.shutil, "copy2", side_effect=OSError(28, "No space left")):
+            sessions.list_sessions()
+        copy = sessions.bundle_jsonl("archive", SID)
+        self.assertIsNotNone(copy)
+        self.assertIn("관리 대상", copy.read_text(encoding="utf-8"))
+
+    def test_refresh_repairs_archive_missing_jsonl(self):
+        self.session()
+        (self.store / "archive" / SID / "projects" / "-Users-jun-dev-demo").mkdir(parents=True)
+        sessions.list_sessions()
+        self.assertIsNotNone(sessions.bundle_jsonl("archive", SID))
+
+    def test_refresh_keeps_archived_folder_removed_from_original(self):
+        p = self.session()
+        sessions.archive(SID)
+        shutil.rmtree(self.claude / "file-history" / SID)
+        os.utime(p)
+        sessions.list_sessions()
+        self.assertTrue((self.store / "archive" / SID / "file-history" / SID / "f").exists())
+
     def test_trash_wins_over_archive(self):
         self.session()
         sessions.archive(SID)
@@ -321,6 +347,16 @@ class StoreTest(Base):
         self.assertFalse((self.store / "archive" / SID).exists())
         with self.assertRaises(sessions.NotFound):
             sessions.unarchive(SID)
+
+    def test_unarchive_only_copy_needs_force(self):
+        p = self.session()
+        sessions.archive(SID)
+        p.unlink()
+        with self.assertRaises(sessions.Conflict):
+            sessions.unarchive(SID)
+        self.assertIsNotNone(sessions.bundle_jsonl("archive", SID))
+        sessions.unarchive(SID, force=True)
+        self.assertFalse((self.store / "archive" / SID).exists())
 
     def test_missing_session_not_found(self):
         for fn in (sessions.archive, sessions.trash, sessions.restore, sessions.revive):
@@ -428,6 +464,14 @@ class HttpTest(Base):
         self.assertTrue(json.loads(self.get("/api/sessions")[1])[0]["trashed"])
         self.assertEqual(self.post(f"/api/session/{SID}/restore")[0], 200)
         self.assertFalse(json.loads(self.get("/api/sessions")[1])[0]["trashed"])
+
+    def test_post_unarchive_only_copy_needs_force(self):
+        sessions.archive(SID)
+        sessions.find_path(SID).unlink()
+        status, body = self.post(f"/api/session/{SID}/unarchive")
+        self.assertEqual(status, 409)
+        self.assertIn("유일한 사본", body["error"])
+        self.assertEqual(self.post(f"/api/session/{SID}/unarchive", {"force": True})[0], 200)
 
     def test_post_errors(self):
         self.assertEqual(self.post(f"/api/session/{SID}/purge")[0], 404)

@@ -120,7 +120,7 @@ def list_sessions():
         if s["id"] in archived:
             copy = bundle_jsonl("archive", s["id"])
             try:
-                if copy and p.stat().st_mtime > copy.stat().st_mtime:
+                if not copy or p.stat().st_mtime > copy.stat().st_mtime:
                     archive(s["id"])
             except (OSError, NotFound):
                 pass  # 갱신에 실패해도 목록은 보여줘야 함. 다음 조회 때 다시 시도
@@ -217,16 +217,22 @@ def _bundle(kind, sid):
 def archive(sid):
     rel = _original_rel(sid)
     dest = STORE_DIR / "archive" / sid
-    shutil.rmtree(dest, ignore_errors=True)
-    for r in bundle_paths(sid, rel):
+    # 기존 보관본을 먼저 지우면 복사가 중간에 실패할 때 유일한 사본이 사라지므로 덮어쓰기만 함
+    for r in bundle_paths(sid, rel)[1:]:
         if (CLAUDE_DIR / r).exists():
             _copy(CLAUDE_DIR / r, dest / r)
+    tmp = (dest / rel).with_suffix(".jsonl.tmp")
+    _copy(CLAUDE_DIR / rel, tmp)
+    os.replace(tmp, dest / rel)  # 다 쓴 뒤에만 바꿔 넣어 잘린 파일이 보관본이 되지 않게
 
 
-def unarchive(sid):
+def unarchive(sid, force=False):
     dest = STORE_DIR / "archive" / sid
     if not dest.is_dir():
         raise NotFound(sid)
+    # 화면의 목록이 오래돼 원본이 이미 자동 정리됐을 수 있으므로 서버에서 다시 확인
+    if not force and not find_path(sid):
+        raise Conflict("원본이 없어 보관본이 유일한 사본입니다")
     shutil.rmtree(dest)
 
 
@@ -294,7 +300,8 @@ def set_meta(sid, **fields):
         return meta[sid]
 
 
-ACTIONS = {"archive": archive, "unarchive": unarchive, "revive": revive, "restore": restore, "purge": purge}
+ACTIONS = {"archive": archive, "unarchive": unarchive, "revive": revive, "restore": restore, "purge": purge,
+           "trash": trash}
 
 
 def clean_meta(body):
@@ -334,15 +341,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local() or self.headers.get("X-Session-Viewer") != "1":
             return self.reply_json({"error": "forbidden"}, 403)
         m = re.fullmatch(r"/api/session/([^/]+)/(\w+)", urlparse(self.path).path)
-        if not m or not UUID_RE.fullmatch(m[1]) or m[2] not in (*ACTIONS, "meta", "trash"):
+        if not m or not UUID_RE.fullmatch(m[1]) or m[2] not in (*ACTIONS, "meta"):
             return self.reply_json({"error": "not found"}, 404)
         sid, action = m.groups()
         try:
             body = self.read_body()
             if action == "meta":
                 return self.reply_json(set_meta(sid, **clean_meta(body)))
-            if action == "trash":
-                trash(sid, force=body.get("force") is True)
+            if action in ("trash", "unarchive"):
+                ACTIONS[action](sid, force=body.get("force") is True)
             else:
                 ACTIONS[action](sid)
         except NotFound:

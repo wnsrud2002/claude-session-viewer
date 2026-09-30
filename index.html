@@ -429,8 +429,14 @@ async function purgeIds(ids) {
 }
 async function reviveId(id) { await post(id, 'revive'); await afterChange('되살렸습니다 — 이제 claude --resume 가능'); }
 async function unarchiveId(id) {
-  if (byId(id).archiveOnly && !confirm('원본이 없어 보관본이 유일한 사본입니다. 보관을 해제하면 되돌릴 수 없습니다.')) return;
-  await post(id, 'unarchive');
+  try {
+    await post(id, 'unarchive');
+  } catch (err) {
+    // 목록의 archiveOnly 표시는 오래됐을 수 있어, 서버가 유일한 사본이라고 알려줄 때 확인받음
+    if (!err.message.includes('유일한 사본')) throw err;
+    if (!confirm(err.message + '. 보관을 해제하면 되돌릴 수 없습니다.')) return;
+    await post(id, 'unarchive', { force: true });
+  }
   await afterChange('보관 해제');
 }
 
