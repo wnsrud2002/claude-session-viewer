@@ -53,6 +53,15 @@ class LoadTest(Base):
         p = self.write([user("가" * 100, "2026-09-01T10:00:00Z")])
         self.assertEqual(sessions.load(p)[0]["title"], "가" * 60)
 
+    def test_title_from_slash_command(self):
+        p = self.write([user("<command-name>/plugin</command-name>\n            <command-message>plugin</command-message>\n"
+                             "            <command-args>install frontend-design</command-args>", "2026-09-01T10:00:00Z")])
+        self.assertEqual(sessions.load(p)[0]["title"], "/plugin install frontend-design")
+
+    def test_title_strips_other_tags(self):
+        p = self.write([user("<local-command-stdout>✓ Installed</local-command-stdout>", "2026-09-01T10:00:00Z")])
+        self.assertEqual(sessions.load(p)[0]["title"], "✓ Installed")
+
     def test_missing_cost_is_none(self):
         s = sessions.load(self.write([user("hi", "2026-09-01T10:00:00Z")]))[0]
         self.assertIsNone(s["costUSD"])

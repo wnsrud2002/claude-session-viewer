@@ -26,6 +26,15 @@ def records(path):
                 yield r
 
 
+def plain_title(text):
+    # 슬래시 명령은 <command-name>/<command-args> 태그로 기록되므로 입력한 모양 그대로 되살림
+    name = re.search(r"<command-name>(.*?)</command-name>", text, re.S)
+    if name:
+        args = re.search(r"<command-args>(.*?)</command-args>", text, re.S)
+        text = name.group(1) + (" " + args.group(1) if args else "")
+    return " ".join(re.sub(r"<[^>]+>", " ", text).split())
+
+
 def to_message(r):
     if r.get("type") not in ("user", "assistant") or r.get("isMeta"):
         return None
@@ -59,7 +68,7 @@ def load(path):
     if not msgs:
         return None, [], ""
     stamps = [m["timestamp"] for m in msgs if m["timestamp"]]
-    first_user = next((m["text"] for m in msgs if m["role"] == "user" and m["text"]), "")
+    first_user = next((t for m in msgs if m["role"] == "user" and (t := plain_title(m["text"]))), "")
     summary = {
         "id": path.stem,
         "title": title or first_user[:60] or "(제목 없음)",
