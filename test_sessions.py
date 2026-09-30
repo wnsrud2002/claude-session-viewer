@@ -393,6 +393,49 @@ class HttpTest(Base):
         status, body = self.get("/api/search?q=HI")
         self.assertEqual((status, [h["id"] for h in json.loads(body)]), (200, [SID]))
 
+    def post(self, path, body=None, header=True, host=None):
+        c = HTTPConnection("127.0.0.1", self.port)
+        headers = {"Host": host or f"127.0.0.1:{self.port}", "Content-Type": "application/json"}
+        if header:
+            headers["X-Session-Viewer"] = "1"
+        c.request("POST", path, body=json.dumps(body or {}), headers=headers)
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r.status, json.loads(data or b"{}")
+
+    def test_post_requires_custom_header(self):
+        self.assertEqual(self.post(f"/api/session/{SID}/meta", {"star": True}, header=False)[0], 403)
+        self.assertEqual(self.post(f"/api/session/{SID}/meta", {"star": True}, host="evil.com")[0], 403)
+        self.assertEqual(sessions.read_meta(), {})
+
+    def test_post_meta(self):
+        self.assertEqual(self.post(f"/api/session/{SID}/meta", {"star": True, "note": "메모"}),
+                         (200, {"star": True, "note": "메모"}))
+        self.assertEqual(json.loads(self.get("/api/sessions")[1])[0]["note"], "메모")
+
+    def test_post_meta_rejects_bad_fields(self):
+        for body in ({"star": "yes"}, {"note": "x" * 2001}, {"other": 1}):
+            self.assertEqual(self.post(f"/api/session/{SID}/meta", body)[0], 400, body)
+        self.assertEqual(sessions.read_meta(), {})
+
+    def test_post_trash_live_then_force(self):
+        # setUp 이 방금 쓴 세션이라 '진행 중'으로 판정됨
+        status, body = self.post(f"/api/session/{SID}/trash")
+        self.assertEqual(status, 409)
+        self.assertIn("진행 중", body["error"])
+        self.assertEqual(self.post(f"/api/session/{SID}/trash", {"force": True})[0], 200)
+        self.assertTrue(json.loads(self.get("/api/sessions")[1])[0]["trashed"])
+        self.assertEqual(self.post(f"/api/session/{SID}/restore")[0], 200)
+        self.assertFalse(json.loads(self.get("/api/sessions")[1])[0]["trashed"])
+
+    def test_post_errors(self):
+        self.assertEqual(self.post(f"/api/session/{SID}/purge")[0], 404)
+        self.assertEqual(self.post(f"/api/session/{SID}/revive")[0], 404)
+        self.assertEqual(self.post(f"/api/session/{SID}/explode")[0], 404)
+        self.assertEqual(self.post("/api/session/../../x/trash")[0], 404)
+        self.assertEqual(self.post("/api/session/not-a-uuid/archive")[0], 404)
+
 
 if __name__ == "__main__":
     unittest.main()

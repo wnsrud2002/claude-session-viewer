@@ -294,10 +294,28 @@ def set_meta(sid, **fields):
         return meta[sid]
 
 
+ACTIONS = {"archive": archive, "unarchive": unarchive, "revive": revive, "restore": restore, "purge": purge}
+
+
+def clean_meta(body):
+    fields = {}
+    for key, value in body.items():
+        if key == "star" and isinstance(value, bool):
+            fields["star"] = value
+        elif key == "note" and isinstance(value, str) and len(value) <= 2000:
+            fields["note"] = value
+        else:
+            raise ValueError(f"잘못된 필드: {key}")
+    return fields
+
+
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def local(self):
         # 127.0.0.1 바인딩만으로는 DNS rebinding 으로 외부 사이트가 읽어갈 수 있어 Host 도 확인
-        if self.headers.get("Host", "").rsplit(":", 1)[0] not in LOCAL_HOSTS:
+        return self.headers.get("Host", "").rsplit(":", 1)[0] in LOCAL_HOSTS
+
+    def do_GET(self):
+        if not self.local():
             return self.reply_json({"error": "forbidden"}, 403)
         url = urlparse(self.path)
         if url.path == "/":
@@ -310,6 +328,41 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/search":
             return self.reply_json(search(parse_qs(url.query).get("q", [""])[0]))
         self.reply_json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        # 다른 사이트는 커스텀 헤더가 붙은 요청을 보낼 수 없어(CORS 사전 확인에서 막힘) CSRF 가 차단됨
+        if not self.local() or self.headers.get("X-Session-Viewer") != "1":
+            return self.reply_json({"error": "forbidden"}, 403)
+        m = re.fullmatch(r"/api/session/([^/]+)/(\w+)", urlparse(self.path).path)
+        if not m or not UUID_RE.fullmatch(m[1]) or m[2] not in (*ACTIONS, "meta", "trash"):
+            return self.reply_json({"error": "not found"}, 404)
+        sid, action = m.groups()
+        try:
+            body = self.read_body()
+            if action == "meta":
+                return self.reply_json(set_meta(sid, **clean_meta(body)))
+            if action == "trash":
+                trash(sid, force=body.get("force") is True)
+            else:
+                ACTIONS[action](sid)
+        except NotFound:
+            return self.reply_json({"error": "not found"}, 404)
+        except Conflict as e:
+            return self.reply_json({"error": str(e)}, 409)
+        except ValueError as e:
+            return self.reply_json({"error": str(e)}, 400)
+        except OSError as e:
+            return self.reply_json({"error": f"파일 작업 실패: {e.strerror}"}, 500)
+        self.reply_json({"ok": True})
+
+    def read_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 65536:
+            raise ValueError("요청이 너무 큽니다")
+        body = json.loads(self.rfile.read(length) or b"{}")
+        if not isinstance(body, dict):
+            raise ValueError("JSON 객체가 필요합니다")
+        return body
 
     def reply_json(self, data, status=200):
         self.reply(status, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
