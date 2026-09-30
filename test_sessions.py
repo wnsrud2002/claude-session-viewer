@@ -136,6 +136,28 @@ class IndexTest(Base):
         self.assertIsNone(sessions.find_path("../../etc/passwd", self.root))
         self.assertIsNone(sessions.find_path("99999999-2222-3333-4444-555555555555", self.root))
 
+    def test_line_cut_mid_utf8_char_skipped(self):
+        p = self.write([user("완성된 줄", "2026-09-01T10:00:00Z")])
+        with open(p, "ab") as f:
+            f.write(json.dumps(user("잘린 한글", "2026-09-01T10:01:00Z"), ensure_ascii=False).encode()[:-5][:40] + "한".encode()[:2])
+        self.assertEqual(sessions.cached(p)[0]["messageCount"], 1)
+
+    def test_odd_record_shapes_skipped(self):
+        p = self.write([
+            user("정상", "2026-09-01T10:00:00Z"),
+            '[1, 2]',
+            rec("user", timestamp="2026-09-01T10:01:00Z", message="hi"),
+            rec("assistant", timestamp="2026-09-01T10:02:00Z", message=None),
+            user(["x", {"type": "text", "text": "섞인 내용"}], "2026-09-01T10:03:00Z"),
+        ])
+        self.assertEqual([m["text"] for m in sessions.cached(p)[1]], ["정상", "섞인 내용"])
+
+    def test_bad_file_does_not_break_list(self):
+        self.write([rec("user", timestamp="2026-09-20T10:00:00Z", cwd=123,
+                        message={"role": "user", "content": "x"})], sid="dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee")
+        self.assertEqual([s["id"] for s in sessions.list_sessions(self.root)], [SID2, SID])
+        self.assertEqual(len(sessions.search("세션", self.root)), 2)
+
     def test_cache_reloads_after_change(self):
         self.assertEqual(sessions.cached(self.old)[0]["messageCount"], 1)
         self.write([user("a", "2026-09-01T10:00:00Z"), user("b", "2026-09-01T10:01:00Z")])

@@ -15,20 +15,25 @@ PORT = 8765
 
 
 def records(path):
-    with open(path, encoding="utf-8") as f:
+    # 기록 중인 세션은 마지막 줄이 한글 중간에서 잘려 있을 수 있어 디코딩 오류도 그 줄만 버림
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
-                yield json.loads(line)
+                r = json.loads(line)
             except json.JSONDecodeError:
-                continue  # 기록 중인 세션은 마지막 줄이 잘려 있을 수 있음
+                continue
+            if isinstance(r, dict):
+                yield r
 
 
 def to_message(r):
     if r.get("type") not in ("user", "assistant") or r.get("isMeta"):
         return None
-    content = r.get("message", {}).get("content", [])
+    message = r.get("message") if isinstance(r.get("message"), dict) else {}
+    content = message.get("content", [])
     if isinstance(content, str):
         content = [{"type": "text", "text": content}]
+    content = [c for c in content if isinstance(c, dict)]
     text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text").strip()
     tools = [c.get("name", "?") for c in content if c.get("type") == "tool_use"]
     if not text and not tools:
@@ -78,11 +83,15 @@ _cache = {}  # path -> (mtime, summary, msgs, haystack)
 
 
 def cached(path):
-    mtime = path.stat().st_mtime
-    hit = _cache.get(path)
-    if not hit or hit[0] != mtime:
-        hit = _cache[path] = (mtime, *load(path))
-    return hit[1:]
+    # 파일 하나가 예상 밖 형태이거나 도중에 지워져도 목록·검색 전체가 죽지 않도록 그 파일만 제외
+    try:
+        mtime = path.stat().st_mtime
+        hit = _cache.get(path)
+        if not hit or hit[0] != mtime:
+            hit = _cache[path] = (mtime, *load(path))
+        return hit[1:]
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None, [], ""
 
 
 def list_sessions(root=None):
