@@ -42,6 +42,19 @@ main { display:grid; grid-template-columns:320px 1fr; min-height:0; }
 #tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
 #map, #flow { min-height:0; overflow:auto; }
 #map svg { display:block; }
+#flow { padding:16px; }
+.resume { display:flex; gap:8px; align-items:center; padding:8px; background:var(--panel); border-radius:6px; }
+.resume code { flex:1; overflow-x:auto; white-space:nowrap; font-size:12px; }
+.msg { margin:8px 0; padding:8px 12px; border-radius:8px; border:1px solid var(--line); }
+.msg.user { background:var(--user); }
+.msg.assistant { background:var(--asst); }
+.msg.tool { background:var(--tool); }
+.msg small { display:block; color:var(--muted); }
+.body { white-space:pre-wrap; word-break:break-word; }
+.folded { cursor:pointer; }
+.folded .body { max-height:6em; overflow:hidden; mask-image:linear-gradient(#000 60%, transparent); }
+.badge { display:inline-block; font-size:12px; padding:0 6px; margin:2px 4px 2px 0; border-radius:10px; border:1px solid var(--line); }
+.gap { text-align:center; color:var(--muted); font-size:12px; }
 @media (max-width:700px) {
   main { grid-template-columns:1fr; grid-template-rows:40vh 1fr; }
   #list { border-right:0; border-bottom:1px solid var(--line); }
@@ -150,6 +163,47 @@ function select(id) {
   state.selected = id;
   renderList(filtered());
   d3.selectAll('#map circle').style('stroke', d => d.id === id ? 'var(--fg)' : 'none');
+  showTab('flow');
+  renderFlow(id);
+}
+
+const fmtGap = ms => ms < 36e5 ? Math.round(ms / 6e4) + '분' : (ms / 36e5).toFixed(1) + '시간';
+
+async function renderFlow(id) {
+  const s = state.sessions.find(x => x.id === id);
+  const box = $('#flow');
+  box.replaceChildren(el('p', { className: 'empty', textContent: '불러오는 중…' }));
+  let msgs;
+  try {
+    msgs = await api('/api/session/' + id);
+  } catch (err) {
+    return box.replaceChildren(el('p', { className: 'empty', textContent: '불러오기 실패: ' + err.message }));
+  }
+  if (state.selected !== id) return;  // 느린 응답이 더 최근에 고른 세션을 덮어쓰지 않도록
+  // 경로에 공백·따옴표가 있어도 셸에 그대로 붙여넣을 수 있게 작은따옴표로 감쌈
+  const cmd = `cd '${(s.cwd ?? '~').replaceAll("'", "'\\''")}' && claude --resume ${id}`;
+  const code = el('code', { textContent: cmd });
+  const copy = el('button', { textContent: '복사' });
+  copy.onclick = () => navigator.clipboard.writeText(cmd).then(
+    () => { copy.textContent = '복사됨'; },
+    // 클립보드 권한이 막힌 브라우저에서도 손으로 복사할 수 있게 명령을 선택해 둠
+    () => { getSelection().selectAllChildren(code); copy.textContent = '⌘C 로 복사'; });
+  let prev = null;
+  const items = msgs.flatMap(m => {
+    const t = Date.parse(m.timestamp), gap = prev ? t - prev : 0;
+    prev = t;
+    const card = el('div', { className: 'msg ' + (m.text ? m.role : 'tool') },
+      el('small', { textContent: `${m.role === 'user' ? '나' : 'Claude'} · ${new Date(t).toLocaleString()}` }),
+      ...m.tools.map(n => el('span', { className: 'badge', textContent: n })),
+      el('div', { className: 'body', textContent: m.text }));
+    if (m.text.length > 300) {
+      card.classList.add('folded');
+      card.onclick = () => card.classList.toggle('folded');
+    }
+    return gap > 6e4 ? [el('div', { className: 'gap', textContent: '+' + fmtGap(gap) }), card] : [card];
+  });
+  box.replaceChildren(el('div', { className: 'resume' }, code, copy),
+    el('h3', { textContent: s.title }), ...items);
 }
 
 function showTab(name) {
