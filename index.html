@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Session Viewer</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
 <style>
 :root { --bg:#fff; --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --panel:#f6f8fa; --accent:#0969da;
   --h0:#ebedf0; --h1:#9be9a8; --h2:#40c463; --h3:#30a14e; --h4:#216e39;
@@ -35,8 +36,12 @@ main { display:grid; grid-template-columns:320px 1fr; min-height:0; }
 #list li.sel { background:var(--panel); box-shadow:inset 3px 0 var(--accent); }
 #list small { display:block; color:var(--muted); }
 #list .snip { font-style:italic; }
-#right { min-height:0; overflow:auto; }
 .empty { color:var(--muted); padding:24px; }
+#right { min-height:0; display:grid; grid-template-rows:auto 1fr; }
+#tabs { display:flex; gap:4px; padding:8px 12px; border-bottom:1px solid var(--line); }
+#tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+#map, #flow { min-height:0; overflow:auto; }
+#map svg { display:block; }
 @media (max-width:700px) {
   main { grid-template-columns:1fr; grid-template-rows:40vh 1fr; }
   #list { border-right:0; border-bottom:1px solid var(--line); }
@@ -52,7 +57,11 @@ main { display:grid; grid-template-columns:320px 1fr; min-height:0; }
 <section id="dash"><div id="heat"></div><div id="cards"></div></section>
 <main>
   <ul id="list"></ul>
-  <section id="right"><p class="empty">세션을 선택하세요</p></section>
+  <section id="right">
+    <nav id="tabs"><button data-tab="map" class="on">지도</button><button data-tab="flow">대화 흐름</button></nav>
+    <div id="map"></div>
+    <div id="flow" hidden><p class="empty">세션을 선택하세요</p></div>
+  </section>
 </main>
 <script>
 const $ = s => document.querySelector(s);
@@ -134,11 +143,68 @@ function render() {
   renderHeat();
   renderCards(list);
   renderList(list);
+  renderMap(list);
 }
 
 function select(id) {
   state.selected = id;
-  render();
+  renderList(filtered());
+  d3.selectAll('#map circle').style('stroke', d => d.id === id ? 'var(--fg)' : 'none');
+}
+
+function showTab(name) {
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  $('#map').hidden = name !== 'map';
+  $('#flow').hidden = name !== 'flow';
+  if (name === 'map') renderMap(filtered());
+}
+$('#tabs').onclick = e => e.target.dataset.tab && showTab(e.target.dataset.tab);
+
+let sim;
+function renderMap(list) {
+  const box = $('#map');
+  if (box.hidden) return;
+  sim?.stop();
+  if (!list.length) return box.replaceChildren(el('p', { className: 'empty', textContent: '표시할 세션이 없습니다' }));
+  const { width: W, height: H } = box.getBoundingClientRect();
+  const now = Date.now(), oldest = Math.min(now - DAY, ...list.map(s => Date.parse(s.start)));
+  const nodes = [
+    ...[...new Set(list.map(s => s.project))].map(p => ({ id: 'p:' + p, label: p, r: 18, project: true })),
+    ...list.map(s => ({ id: s.id, label: s.title, r: Math.min(24, 4 + Math.sqrt(s.messageCount) * 1.5), s })),
+  ];
+  const links = list.map(s => ({ source: 'p:' + s.project, target: s.id }));
+  const svg = d3.create('svg').attr('viewBox', [0, 0, W, H]).attr('width', W).attr('height', H);
+  const link = svg.append('g').style('stroke', 'var(--line)').selectAll('line').data(links).join('line');
+  // SVG 속성(fill=) 에는 CSS 변수가 안 먹어서 색은 전부 style 로 지정
+  const node = svg.append('g').selectAll('circle').data(nodes).join('circle')
+    .attr('r', d => d.r)
+    .style('fill', d => d.project ? 'var(--muted)' : 'var(--accent)')
+    .style('fill-opacity', d => d.project ? 0.5 : 0.25 + 0.75 * (Date.parse(d.s.start) - oldest) / (now - oldest))
+    .style('stroke', d => d.id === state.selected ? 'var(--fg)' : 'none')
+    .style('stroke-width', 2)
+    .style('cursor', d => d.project ? 'grab' : 'pointer')
+    .on('click', (e, d) => d.project || select(d.id))
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = d.fy = null; }));
+  node.append('title').text(d => d.project ? d.label : `${d.label}\n${dayKey(d.s.start)} · 메시지 ${d.s.messageCount}`);
+  const label = svg.append('g').selectAll('text').data(nodes.filter(d => d.project)).join('text')
+    .text(d => d.label).attr('font-size', 11).attr('text-anchor', 'middle').attr('dy', -22).style('fill', 'var(--fg)');
+  sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(40))
+    .force('charge', d3.forceManyBody().strength(-30))
+    .force('collide', d3.forceCollide(d => d.r + 1))
+    .force('center', d3.forceCenter(W / 2, H / 2))
+    // 프로젝트 무리끼리는 링크가 없어 서로 밀어내며 화면 밖으로 흩어지므로 중앙으로 당김
+    .force('x', d3.forceX(W / 2).strength(0.08))
+    .force('y', d3.forceY(H / 2).strength(0.08))
+    .on('tick', () => {
+      link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+      node.attr('cx', d => d.x).attr('cy', d => d.y);
+      label.attr('x', d => d.x).attr('y', d => d.y);
+    });
+  box.replaceChildren(svg.node());
 }
 
 let timer;
