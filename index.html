@@ -157,7 +157,7 @@ const byId = id => state.sessions.find(s => s.id === id);
 const matchBase = s => VIEWS[state.view][1](s) && (!state.projects.size || state.projects.has(s.project)) && (!state.hits || state.hits.has(s.id));
 function filtered() {
   const since = state.days ? Date.now() - state.days * DAY : 0;
-  return state.sessions.filter(s => matchBase(s) && Date.parse(s.end) >= since && (!state.day || dayKey(s.start) === state.day));
+  return state.sessions.filter(s => matchBase(s) && (!since || Date.parse(s.end) >= since) && (!state.day || dayKey(s.start) === state.day));
 }
 
 function renderViews() {
@@ -489,7 +489,9 @@ const keys = {
     a?.blur?.();
   },
 };
-const targets = () => state.checked.size ? [...state.checked] : state.selected ? [state.selected] : [];
+// 필터로 가려진 세션이 단축키로 지워지지 않도록 지금 목록에 보이는 선택만 대상으로 함
+const targets = () => state.checked.size ? [...state.checked]
+  : filtered().some(s => s.id === state.selected) ? [state.selected] : [];
 const run = fn => () => Promise.resolve().then(fn).catch(fail);
 const del = run(() => targets().length && (state.view === 'trash' ? purgeIds(targets()) : trashIds(targets())));
 const escBase = keys.Escape;
@@ -508,7 +510,7 @@ Object.assign(keys, {
 document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey || $('#help').open) return;
   // 입력칸에서 글자를 칠 때 단축키가 먹으면 안 되므로 Esc 만 통과
-  if (e.target.matches?.('input, textarea, select') && e.key !== 'Escape') return;
+  if (e.target.matches?.('input:not([type=checkbox]), textarea, select') && e.key !== 'Escape') return;
   const fn = keys[e.key];
   if (fn) { e.preventDefault(); fn(e); }
 });
