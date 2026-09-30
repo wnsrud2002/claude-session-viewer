@@ -2,10 +2,12 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 import sessions
 
@@ -29,7 +31,14 @@ def asst(blocks, ts, mid="msg_1", usage=None):
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        base = Path(self.tmp.name)
+        self.claude, self.store = base / "claude", base / "store"
+        self.root = self.claude / "projects"
+        self.root.mkdir(parents=True)
+        patcher = mock.patch.multiple(sessions, CLAUDE_DIR=self.claude, STORE_DIR=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        sessions._cache.clear()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -40,6 +49,17 @@ class Base(unittest.TestCase):
         p = d / f"{sid}.jsonl"
         p.write_text("\n".join(l if isinstance(l, str) else json.dumps(l, ensure_ascii=False)
                                for l in lines) + "\n", encoding="utf-8")
+        return p
+
+    def session(self, sid=SID, project="-Users-jun-dev-demo", age=3600):
+        # age 초만큼 mtime 을 과거로 돌려 '진행 중'으로 판정되지 않게 함
+        p = self.write([user("관리 대상", "2026-09-01T10:00:00Z")], sid=sid, project=project)
+        for f in (p.with_suffix("") / "tool-results" / "r.txt",
+                  self.claude / "file-history" / sid / "f", self.claude / "session-env" / sid / "e"):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x")
+        old = time.time() - age
+        os.utime(p, (old, old))
         return p
 
 
@@ -124,26 +144,26 @@ class IndexTest(Base):
         self.new = self.write([user("새 세션 Python", "2026-09-10T10:00:00Z")], sid=SID2, project="-Users-jun-x")
 
     def test_list_sorted_newest_first(self):
-        self.assertEqual([s["id"] for s in sessions.list_sessions(self.root)], [SID2, SID])
+        self.assertEqual([s["id"] for s in sessions.list_sessions()], [SID2, SID])
 
     def test_list_skips_empty_session(self):
         self.write([rec("mode")], sid="cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee")
-        self.assertEqual(len(sessions.list_sessions(self.root)), 2)
+        self.assertEqual(len(sessions.list_sessions()), 2)
 
     def test_search_case_insensitive(self):
-        self.assertEqual([h["id"] for h in sessions.search("PYTHON", self.root)], [SID2])
-        self.assertEqual(sorted(h["id"] for h in sessions.search("세션", self.root)), sorted([SID, SID2]))
+        self.assertEqual([h["id"] for h in sessions.search("PYTHON")], [SID2])
+        self.assertEqual(sorted(h["id"] for h in sessions.search("세션")), sorted([SID, SID2]))
 
     def test_search_snippet_contains_query(self):
-        self.assertIn("python", sessions.search("python", self.root)[0]["snippet"])
+        self.assertIn("python", sessions.search("python")[0]["snippet"])
 
     def test_search_empty_query(self):
-        self.assertEqual(sessions.search("   ", self.root), [])
+        self.assertEqual(sessions.search("   "), [])
 
     def test_find_path(self):
-        self.assertEqual(sessions.find_path(SID, self.root), self.old)
-        self.assertIsNone(sessions.find_path("../../etc/passwd", self.root))
-        self.assertIsNone(sessions.find_path("99999999-2222-3333-4444-555555555555", self.root))
+        self.assertEqual(sessions.find_path(SID), self.old)
+        self.assertIsNone(sessions.find_path("../../etc/passwd"))
+        self.assertIsNone(sessions.find_path("99999999-2222-3333-4444-555555555555"))
 
     def test_line_cut_mid_utf8_char_skipped(self):
         p = self.write([user("완성된 줄", "2026-09-01T10:00:00Z")])
@@ -164,8 +184,8 @@ class IndexTest(Base):
     def test_bad_file_does_not_break_list(self):
         self.write([rec("user", timestamp="2026-09-20T10:00:00Z", cwd=123,
                         message={"role": "user", "content": "x"})], sid="dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee")
-        self.assertEqual([s["id"] for s in sessions.list_sessions(self.root)], [SID2, SID])
-        self.assertEqual(len(sessions.search("세션", self.root)), 2)
+        self.assertEqual([s["id"] for s in sessions.list_sessions()], [SID2, SID])
+        self.assertEqual(len(sessions.search("세션")), 2)
 
     def test_cache_reloads_after_change(self):
         self.assertEqual(sessions.cached(self.old)[0]["messageCount"], 1)
@@ -175,12 +195,113 @@ class IndexTest(Base):
         self.assertEqual(sessions.cached(self.old)[0]["messageCount"], 2)
 
 
+class StoreTest(Base):
+    def rels(self, sid=SID, project="-Users-jun-dev-demo"):
+        return [Path("projects") / project / f"{sid}.jsonl", Path("projects") / project / sid / "tool-results" / "r.txt",
+                Path("file-history") / sid / "f", Path("session-env") / sid / "e"]
+
+    def test_archive_copies_bundle_and_keeps_original(self):
+        self.session()
+        sessions.archive(SID)
+        for r in self.rels():
+            self.assertTrue((self.store / "archive" / SID / r).exists(), r)
+            self.assertTrue((self.claude / r).exists(), r)
+
+    def test_archive_preserves_mtime(self):
+        p = self.session()
+        sessions.archive(SID)
+        self.assertEqual(sessions.bundle_jsonl("archive", SID).stat().st_mtime, p.stat().st_mtime)
+
+    def test_trash_then_restore_roundtrip(self):
+        self.session()
+        sessions.trash(SID)
+        for r in self.rels():
+            self.assertFalse((self.claude / r).exists(), r)
+            self.assertTrue((self.store / "trash" / SID / r).exists(), r)
+        sessions.restore(SID)
+        for r in self.rels():
+            self.assertTrue((self.claude / r).exists(), r)
+        self.assertFalse((self.store / "trash" / SID).exists())
+
+    def test_restore_refuses_when_original_back(self):
+        self.session()
+        sessions.trash(SID)
+        self.session()
+        with self.assertRaises(sessions.Conflict):
+            sessions.restore(SID)
+        self.assertTrue(sessions.bundle_jsonl("trash", SID).exists())
+
+    def test_trash_live_session_needs_force(self):
+        self.session(age=0)
+        with self.assertRaises(sessions.Conflict):
+            sessions.trash(SID)
+        sessions.trash(SID, force=True)
+        self.assertIsNone(sessions.find_path(SID))
+
+    def test_purge_only_from_trash(self):
+        self.session()
+        with self.assertRaises(sessions.NotFound):
+            sessions.purge(SID)
+        sessions.trash(SID)
+        sessions.purge(SID)
+        self.assertFalse((self.store / "trash" / SID).exists())
+        self.assertIsNone(sessions.find_path(SID))
+
+    def test_purge_rejects_escape(self):
+        with self.assertRaises(sessions.NotFound):
+            sessions.purge("../archive")
+
+    def test_revive_copies_archive_back(self):
+        p = self.session()
+        sessions.archive(SID)
+        p.unlink()
+        sessions.revive(SID)
+        self.assertTrue(p.exists())
+        self.assertTrue(sessions.bundle_jsonl("archive", SID).exists())
+        with self.assertRaises(sessions.Conflict):
+            sessions.revive(SID)
+
+    def test_unarchive(self):
+        self.session()
+        sessions.archive(SID)
+        sessions.unarchive(SID)
+        self.assertFalse((self.store / "archive" / SID).exists())
+        with self.assertRaises(sessions.NotFound):
+            sessions.unarchive(SID)
+
+    def test_missing_session_not_found(self):
+        for fn in (sessions.archive, sessions.trash, sessions.restore, sessions.revive):
+            with self.assertRaises(sessions.NotFound):
+                fn(SID)
+
+    def test_meta_roundtrip(self):
+        sessions.set_meta(SID, star=True)
+        sessions.set_meta(SID, note="메모")
+        self.assertEqual(sessions.read_meta()[SID], {"star": True, "note": "메모"})
+
+    def test_corrupt_meta_is_not_overwritten(self):
+        self.store.mkdir()
+        (self.store / "meta.json").write_text("{broken")
+        with self.assertRaises(ValueError):
+            sessions.set_meta(SID, star=True)
+        self.assertEqual((self.store / "meta.json").read_text(), "{broken")
+        self.assertEqual(sessions.read_meta(), {})
+
+    def test_history_jsonl_untouched(self):
+        h = self.claude / "history.jsonl"
+        h.write_text('{"display":"x"}\n')
+        self.session()
+        sessions.archive(SID)
+        sessions.trash(SID)
+        sessions.restore(SID)
+        self.assertEqual(h.read_text(), '{"display":"x"}\n')
+
+
 class HttpTest(Base):
     def setUp(self):
         super().setUp()
         sessions._cache.clear()
         self.write([user("hi <img src=x onerror=alert(1)>", "2026-09-01T10:00:00Z")])
-        self.orig_root, sessions.ROOT = sessions.ROOT, self.root
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), sessions.Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.port = self.server.server_address[1]
@@ -188,7 +309,6 @@ class HttpTest(Base):
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
-        sessions.ROOT = self.orig_root
         super().tearDown()
 
     def get(self, path, host=None):

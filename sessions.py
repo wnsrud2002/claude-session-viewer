@@ -1,17 +1,24 @@
 """~/.claude/projects 의 Claude Code 세션 기록을 브라우저로 보는 로컬 서버."""
 import json
+import os
 import re
+import shutil
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-ROOT = Path.home() / ".claude" / "projects"
+CLAUDE_DIR = Path(os.environ.get("SV_CLAUDE_DIR", Path.home() / ".claude"))
+# ~/.claude 밖에 둬서 Claude Code 의 자동 정리 대상이 되지 않게 함
+STORE_DIR = Path(os.environ.get("SV_STORE_DIR", Path.home() / ".claude-session-viewer"))
 HERE = Path(__file__).resolve().parent
 TEXT_LIMIT = 10_000  # ponytail: 긴 메시지는 잘라서 전송, 전문 보기가 필요해지면 별도 엔드포인트
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
 PORT = 8765
+LIVE_SECONDS = 300
 
 
 def records(path):
@@ -103,29 +110,160 @@ def cached(path):
         return None, [], ""
 
 
-def list_sessions(root=None):
-    root = root or ROOT
-    found = [s for p in root.glob("*/*.jsonl") if (s := cached(p)[0])]
+def list_sessions():
+    found = [s for p in (CLAUDE_DIR / "projects").glob("*/*.jsonl") if (s := cached(p)[0])]
     return sorted(found, key=lambda s: s["end"] or "", reverse=True)
 
 
-def find_path(sid, root=None):
+def find_path(sid):
     if not UUID_RE.fullmatch(sid):
         return None  # glob 에 ../ 나 와일드카드가 섞이지 않도록 UUID 만 허용
-    return next((root or ROOT).glob(f"*/{sid}.jsonl"), None)
+    return next((CLAUDE_DIR / "projects").glob(f"*/{sid}.jsonl"), None)
 
 
-def search(q, root=None):
+def search(q):
     q = q.strip().lower()
     if not q:
         return []
     hits = []
-    for p in (root or ROOT).glob("*/*.jsonl"):
+    for p in (CLAUDE_DIR / "projects").glob("*/*.jsonl"):
         summary, _, hay = cached(p)
         i = hay.find(q)
         if summary and i >= 0:
             hits.append({"id": summary["id"], "snippet": hay[max(0, i - 40): i + len(q) + 40]})
     return hits
+
+
+class NotFound(Exception):
+    pass
+
+
+class Conflict(Exception):
+    pass
+
+
+def bundle_paths(sid, rel):
+    # history.jsonl 은 모든 세션이 공유하는 파일이라 번들에 넣지 않음
+    return [rel, rel.with_suffix(""), Path("file-history") / sid, Path("session-env") / sid]
+
+
+def bundle_jsonl(kind, sid):
+    return next((STORE_DIR / kind / sid / "projects").glob(f"*/{sid}.jsonl"), None)
+
+
+def is_live(path):
+    try:
+        return time.time() - path.stat().st_mtime < LIVE_SECONDS
+    except OSError:
+        return False
+
+
+def _copy(src, dst):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    else:
+        shutil.copy2(src, dst)  # mtime 을 보존해야 보관본 갱신 여부를 비교할 수 있음
+
+
+def _move(src, dst):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(src, dst)
+
+
+def _original_rel(sid):
+    src = find_path(sid)
+    if not src:
+        raise NotFound(sid)
+    return src.relative_to(CLAUDE_DIR)
+
+
+def _bundle(kind, sid):
+    j = bundle_jsonl(kind, sid)
+    if not j:
+        raise NotFound(sid)
+    bundle = STORE_DIR / kind / sid
+    return bundle, [r for r in bundle_paths(sid, j.relative_to(bundle)) if (bundle / r).exists()]
+
+
+def archive(sid):
+    rel = _original_rel(sid)
+    dest = STORE_DIR / "archive" / sid
+    shutil.rmtree(dest, ignore_errors=True)
+    for r in bundle_paths(sid, rel):
+        if (CLAUDE_DIR / r).exists():
+            _copy(CLAUDE_DIR / r, dest / r)
+
+
+def unarchive(sid):
+    dest = STORE_DIR / "archive" / sid
+    if not dest.is_dir():
+        raise NotFound(sid)
+    shutil.rmtree(dest)
+
+
+def trash(sid, force=False):
+    rel = _original_rel(sid)
+    if not force and is_live(CLAUDE_DIR / rel):
+        raise Conflict("최근 5분 안에 기록된 세션이라 진행 중일 수 있습니다")
+    dest = STORE_DIR / "trash" / sid
+    if dest.exists():
+        raise Conflict("휴지통에 같은 세션이 이미 있습니다")
+    for r in bundle_paths(sid, rel):
+        if (CLAUDE_DIR / r).exists():
+            _move(CLAUDE_DIR / r, dest / r)
+
+
+def restore(sid):
+    bundle, rels = _bundle("trash", sid)
+    if any((CLAUDE_DIR / r).exists() for r in rels):
+        raise Conflict("원래 위치에 같은 세션이 이미 있습니다")
+    for r in rels:
+        _move(bundle / r, CLAUDE_DIR / r)
+    shutil.rmtree(bundle)
+
+
+def revive(sid):
+    bundle, rels = _bundle("archive", sid)
+    if (CLAUDE_DIR / rels[0]).exists():
+        raise Conflict("원본 세션이 이미 있습니다")
+    for r in rels:
+        if not (CLAUDE_DIR / r).exists():  # 자동 정리 뒤 일부 폴더만 남아 있을 수 있어 있는 건 그대로 둠
+            _copy(bundle / r, CLAUDE_DIR / r)
+
+
+def purge(sid):
+    trash_dir = (STORE_DIR / "trash").resolve()
+    dest = (trash_dir / sid).resolve()
+    if dest.parent != trash_dir or not dest.is_dir():  # ../ 나 링크로 휴지통 밖을 가리키면 지우지 않음
+        raise NotFound(sid)
+    shutil.rmtree(dest)
+
+
+_meta_lock = threading.Lock()
+
+
+def read_meta():
+    try:
+        data = json.loads((STORE_DIR / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def set_meta(sid, **fields):
+    with _meta_lock:
+        f = STORE_DIR / "meta.json"
+        # 깨진 meta.json 을 빈 dict 로 덮어쓰면 모든 메모가 사라지므로 읽기 실패는 그대로 올려보냄
+        meta = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+        if not isinstance(meta, dict):
+            raise ValueError("meta.json 형식이 올바르지 않습니다")
+        meta[sid] = {**meta.get(sid, {}), **fields}
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(f)  # 쓰는 도중 죽어도 기존 파일이 반쯤 덮이지 않게
+        return meta[sid]
 
 
 class Handler(BaseHTTPRequestHandler):
