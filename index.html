@@ -6,9 +6,9 @@
 <title>Session Viewer</title>
 <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
 <style>
-:root { color-scheme:dark; --bg:#0b0f0c; --panel:#101712; --line:#1d2b20; --fg:#c8f7d0; --dim:#7fa488; --faint:#3a5a41;
-  --accent:#5fd47a; --star:#e8c35a; --danger:#ff6b6b; --sel:#14261a;
-  --h0:#10231a; --h1:#1a4a2b; --h2:#1f7a3e; --h3:#2fb35a; --h4:#7df29a; }
+:root { color-scheme:dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#9da7b3; --faint:#7d8590;
+  --accent:#56d364; --star:#e3b341; --danger:#ff7b72; --sel:#1f2937;
+  --h0:#161b22; --h1:#0e4429; --h2:#006d32; --h3:#26a641; --h4:#39d353; }
 * { box-sizing:border-box; }
 [hidden] { display:none !important; }
 body { margin:0; height:100vh; display:grid; grid-template-rows:auto auto 1fr auto;
@@ -70,7 +70,7 @@ main { display:grid; grid-template-columns:minmax(0, 380px) minmax(0, 1fr); min-
 .time { color:var(--faint); }
 .tool { color:var(--star); padding-left:1.6em; }
 .body { white-space:pre-wrap; word-break:break-word; padding-left:1.6em; }
-.msg.user .body { color:#e6ffe9; }
+.msg.user .body { color:#fff; }
 .folded { cursor:pointer; }
 .folded .body { max-height:6.2em; overflow:hidden; mask-image:linear-gradient(#000 55%, transparent); }
 .gap { color:var(--faint); text-align:center; padding:4px 0; }
