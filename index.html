@@ -80,6 +80,14 @@ footer { display:flex; align-items:center; gap:10px; padding:5px 16px; border-to
 dialog { background:var(--panel); color:var(--fg); border:1px solid var(--accent); padding:16px 20px; }
 dialog::backdrop { background:rgba(0,0,0,.6); }
 dialog pre { margin:0 0 12px; font:inherit; }
+.pick { position:absolute; right:10px; top:7px; opacity:0; accent-color:var(--accent); }
+#list li:hover .pick, #list.picking .pick, .pick:checked { opacity:1; }
+.acts { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+#note { display:block; width:100%; resize:vertical; cursor:text; padding:4px 8px; }
+#note::placeholder { color:var(--faint); }
+#status { display:flex; align-items:center; gap:8px; color:var(--fg); }
+#toast { position:fixed; left:50%; bottom:44px; transform:translateX(-50%); padding:6px 14px;
+  background:var(--panel); border:1px solid var(--accent); display:flex; gap:10px; align-items:center; }
 @keyframes blink { 50% { opacity:0; } }
 @keyframes twinkle { 50% { opacity:.35; } }
 @media (prefers-reduced-motion: reduce) { .cursor, #map circle.twinkle { animation:none; } }
@@ -107,17 +115,23 @@ dialog pre { margin:0 0 12px; font:inherit; }
   </section>
 </main>
 <footer><span id="status"></span><span id="hint">↑↓ 이동 · Enter 열기 · / 검색 · ? 도움말</span></footer>
+<div id="toast" hidden></div>
 <dialog id="help"><pre>
 ↑ ↓  j k   목록 이동
 Enter      대화 흐름 열기
 /          검색
-Esc        검색 지우기
+Esc        검색 지우기 · 선택 해제
+s          즐겨찾기
+a          보관
+n          메모
+x          선택 (Shift+클릭으로 범위)
+Delete     삭제 (휴지통 보기에선 영구 삭제)
 ?          이 도움말
 </pre><form method="dialog"><button>닫기</button></form></dialog>
 <script>
 const $ = s => document.querySelector(s);
 const DAY = 864e5;
-const state = { sessions: [], hits: null, projects: new Set(), days: 0, day: null, view: 'all', selected: null };
+const state = { sessions: [], hits: null, projects: new Set(), days: 0, day: null, view: 'all', selected: null, checked: new Set() };
 const VIEWS = {
   all: ['전체', s => !s.trashed],
   star: ['★', s => s.star && !s.trashed],
@@ -192,6 +206,8 @@ function row(s) {
     el('small', { textContent: `${s.project} · ${dayKey(s.start)} · 메시지 ${s.messageCount}` }));
   if (s.note) li.append(el('small', { textContent: '✎ ' + s.note.split('\n')[0] }));
   if (state.hits) li.append(el('small', { className: 'snip', textContent: '…' + state.hits.get(s.id) + '…' }));
+  li.prepend(el('input', { type: 'checkbox', className: 'pick', checked: state.checked.has(s.id),
+    onclick: e => { e.stopPropagation(); toggleCheck(s.id, e.shiftKey); } }));
   li.dataset.id = s.id;
   li.classList.toggle('sel', s.id === state.selected);
   return li;
@@ -220,6 +236,7 @@ function render() {
   renderCards(list);
   renderList(list);
   renderMap(list);
+  renderBulk();
 }
 
 async function reload() {
@@ -312,7 +329,16 @@ function resumeLine(s, id) {
 }
 
 function flowHeader(s, id) {
-  return resumeLine(s, id);
+  const acts = s.trashed
+    ? [btn('복원', () => restoreIds([id])), btn('영구 삭제', () => purgeIds([id]), 'danger')]
+    : [btn(s.star ? '★ 즐겨찾기 해제' : '☆ 즐겨찾기', () => toggleStar(id)),
+       s.archiveOnly ? btn('되살리기', () => reviveId(id)) : btn(s.archived ? '보관 갱신' : '보관', () => archiveIds([id])),
+       ...(s.archived || s.archiveOnly ? [btn('보관 해제', () => unarchiveId(id))] : []),
+       ...(s.archiveOnly ? [] : [btn('삭제', () => trashIds([id]), 'danger')])];
+  const note = el('textarea', { id: 'note', rows: 2, value: s.note, placeholder: '메모 — 다른 곳을 누르면 저장' });
+  note.onblur = () => note.value !== s.note && saveNote(id, note.value).catch(fail);
+  // 원본이 없는 세션은 resume 해도 열리지 않으므로 명령을 보여주지 않음
+  return el('div', {}, ...(s.trashed || s.archiveOnly ? [] : [resumeLine(s, id)]), el('div', { className: 'acts' }, ...acts), note);
 }
 
 async function renderFlow(id) {
@@ -346,6 +372,93 @@ async function renderFlow(id) {
   box.replaceChildren(flowHeader(s, id), el('h3', { textContent: '# ' + s.title }), ...items);
 }
 
+async function post(id, action, body = {}) {
+  const r = await fetch(`/api/session/${id}/${action}`, {
+    method: 'POST', headers: { 'X-Session-Viewer': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+
+let toastTimer;
+function toast(msg, undo) {
+  const t = $('#toast');
+  t.replaceChildren(msg, ...(undo ? [el('button', { textContent: '되돌리기', onclick: () => { t.hidden = true; undo(); } })] : []));
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 5000);
+}
+const fail = err => toast('실패: ' + err.message);
+const btn = (label, fn, cls = '') => el('button', { textContent: label, className: cls, onclick: () => Promise.resolve().then(fn).catch(fail) });
+
+async function afterChange(msg, undo) {
+  await reload();
+  if (!$('#flow').hidden && state.selected && byId(state.selected)) renderFlow(state.selected);
+  if (msg) toast(msg, undo);
+}
+async function each(ids, action, body = () => ({})) {
+  try {
+    for (const id of ids) await post(id, action, body(id));
+  } finally {
+    state.checked.clear();  // 일부만 성공해도 목록은 실제 상태로 다시 그림
+  }
+}
+
+async function toggleStar(id) { await post(id, 'meta', { star: !byId(id).star }); await afterChange(); }
+async function saveNote(id, note) { await post(id, 'meta', { note }); await reload(); toast('메모 저장됨'); }
+
+async function archiveIds(ids) {
+  ids = ids.filter(id => !byId(id)?.archiveOnly);
+  if (!ids.length) return;
+  await each(ids, 'archive');
+  await afterChange(`보관 ${ids.length}개`);
+}
+async function trashIds(ids) {
+  ids = ids.filter(id => !byId(id)?.archiveOnly);
+  if (!ids.length) return toast('보관본만 있는 세션은 삭제 대신 보관 해제를 쓰세요');
+  const live = ids.filter(id => byId(id)?.live);
+  if (live.length && !confirm(`최근 5분 안에 기록된 세션 ${live.length}개가 있습니다.\n진행 중인 대화라면 Claude Code 가 파일을 다시 만들 수 있습니다. 그래도 삭제할까요?`)) return;
+  await each(ids, 'trash', id => ({ force: live.includes(id) }));
+  await afterChange(`삭제됨 ${ids.length}개`, () => restoreIds(ids).catch(fail));
+}
+async function restoreIds(ids) { await each(ids, 'restore'); await afterChange(`복원 ${ids.length}개`); }
+async function purgeIds(ids) {
+  if (!confirm(`${ids.length}개 세션을 영구 삭제합니다. 되돌릴 수 없습니다.`)) return;
+  await each(ids, 'purge');
+  await afterChange(`영구 삭제 ${ids.length}개`);
+}
+async function reviveId(id) { await post(id, 'revive'); await afterChange('되살렸습니다 — 이제 claude --resume 가능'); }
+async function unarchiveId(id) {
+  if (byId(id).archiveOnly && !confirm('원본이 없어 보관본이 유일한 사본입니다. 보관을 해제하면 되돌릴 수 없습니다.')) return;
+  await post(id, 'unarchive');
+  await afterChange('보관 해제');
+}
+
+let lastPick = null;
+function toggleCheck(id, range) {
+  const ids = filtered().map(s => s.id);
+  const [a, b] = [ids.indexOf(lastPick), ids.indexOf(id)].sort((x, y) => x - y);
+  const span = range && a >= 0 ? ids.slice(a, b + 1) : [id];
+  const on = !state.checked.has(id);
+  span.forEach(x => on ? state.checked.add(x) : state.checked.delete(x));
+  lastPick = id;
+  renderList(filtered());
+  renderBulk();
+}
+function renderBulk() {
+  const visible = new Set(filtered().map(s => s.id));
+  // 보기·필터가 바뀌어 안 보이게 된 세션은 일괄 동작 대상에서 뺌
+  for (const id of state.checked) if (!visible.has(id)) state.checked.delete(id);
+  const ids = [...state.checked];
+  $('#list').classList.toggle('picking', ids.length > 0);
+  if (!ids.length) return $('#status').replaceChildren();
+  $('#status').replaceChildren(`${ids.length}개 선택`,
+    ...(state.view === 'trash'
+      ? [btn('복원', () => restoreIds(ids)), btn('영구 삭제', () => purgeIds(ids), 'danger')]
+      : [btn('보관', () => archiveIds(ids)), btn('삭제', () => trashIds(ids), 'danger')]),
+    btn('선택 해제', () => { state.checked.clear(); renderList(filtered()); renderBulk(); }));
+}
+
 const move = d => () => {
   const list = filtered();
   if (!list.length) return;
@@ -363,6 +476,22 @@ const keys = {
     a?.blur?.();
   },
 };
+const targets = () => state.checked.size ? [...state.checked] : state.selected ? [state.selected] : [];
+const run = fn => () => Promise.resolve().then(fn).catch(fail);
+const del = run(() => targets().length && (state.view === 'trash' ? purgeIds(targets()) : trashIds(targets())));
+const escBase = keys.Escape;
+Object.assign(keys, {
+  s: run(() => state.selected && state.view !== 'trash' && toggleStar(state.selected)),
+  a: run(() => state.view !== 'trash' && targets().length && archiveIds(targets())),
+  n: () => state.selected && state.view !== 'trash' && select(state.selected).then(() => $('#note')?.focus()),
+  x: () => state.selected && toggleCheck(state.selected),
+  Delete: del,
+  Backspace: del,
+  Escape: () => {
+    escBase();
+    if (state.checked.size) { state.checked.clear(); renderList(filtered()); renderBulk(); }
+  },
+});
 document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey || $('#help').open) return;
   // 입력칸에서 글자를 칠 때 단축키가 먹으면 안 되므로 Esc 만 통과
