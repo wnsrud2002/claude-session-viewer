@@ -302,6 +302,27 @@ class StoreTest(Base):
             self.assertTrue((self.claude / r).exists(), r)
         self.assertFalse((self.store / "trash" / SID).exists())
 
+    def test_restore_can_retry_after_partial_failure(self):
+        self.session()
+        sessions.trash(SID)
+        real_move, calls = sessions._move, []
+
+        def flaky(src, dst):
+            calls.append(src)
+            if len(calls) == 2:
+                raise OSError(5, "I/O error")
+            real_move(src, dst)
+
+        with mock.patch.object(sessions, "_move", flaky):
+            with self.assertRaises(OSError):
+                sessions.restore(SID)
+        # 대화 본체가 아직 휴지통에 있어야 목록에서 '휴지통'으로 보이고 다시 복원할 수 있음
+        self.assertIsNotNone(sessions.bundle_jsonl("trash", SID))
+        sessions.restore(SID)
+        for r in self.rels():
+            self.assertTrue((self.claude / r).exists(), r)
+        self.assertFalse((self.store / "trash" / SID).exists())
+
     def test_restore_refuses_when_original_back(self):
         self.session()
         sessions.trash(SID)

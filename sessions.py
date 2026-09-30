@@ -252,7 +252,8 @@ def restore(sid):
     bundle, rels = _bundle("trash", sid)
     if any((CLAUDE_DIR / r).exists() for r in rels):
         raise Conflict("원래 위치에 같은 세션이 이미 있습니다")
-    for r in rels:
+    # 대화 본체를 마지막에 옮겨야 중간에 실패해도 세션이 '휴지통'으로 남아 다시 복원할 수 있음
+    for r in rels[1:] + rels[:1]:
         _move(bundle / r, CLAUDE_DIR / r)
     shutil.rmtree(bundle)
 

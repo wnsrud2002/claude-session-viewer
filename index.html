@@ -396,13 +396,22 @@ async function afterChange(msg, undo) {
   if (!$('#flow').hidden && state.selected && byId(state.selected)) renderFlow(state.selected);
   if (msg) toast(msg, undo);
 }
+// 하나가 실패해도 나머지는 계속 처리하고, 성공한 것만 되돌릴 수 있게 결과를 나눠 돌려줌
 async function each(ids, action, body = () => ({})) {
-  try {
-    for (const id of ids) await post(id, action, body(id));
-  } finally {
-    state.checked.clear();  // 일부만 성공해도 목록은 실제 상태로 다시 그림
+  const done = [], errors = [];
+  for (const id of ids) {
+    try {
+      await post(id, action, body(id));
+      done.push(id);
+    } catch (err) {
+      errors.push(`${byId(id)?.title ?? id}: ${err.message}`);
+    }
   }
+  state.checked.clear();
+  return { done, errors };
 }
+const summary = (verb, { done, errors }) =>
+  `${verb} ${done.length}개` + (errors.length ? ` · 실패 ${errors.length}개 (${errors[0]}${errors.length > 1 ? ' 외' : ''})` : '');
 
 async function toggleStar(id) { await post(id, 'meta', { star: !byId(id).star }); await afterChange(); }
 async function saveNote(id, note) { await post(id, 'meta', { note }); await reload(); toast('메모 저장됨'); }
@@ -410,22 +419,20 @@ async function saveNote(id, note) { await post(id, 'meta', { note }); await relo
 async function archiveIds(ids) {
   ids = ids.filter(id => !byId(id)?.archiveOnly);
   if (!ids.length) return;
-  await each(ids, 'archive');
-  await afterChange(`보관 ${ids.length}개`);
+  await afterChange(summary('보관', await each(ids, 'archive')));
 }
 async function trashIds(ids) {
   ids = ids.filter(id => !byId(id)?.archiveOnly);
   if (!ids.length) return toast('보관본만 있는 세션은 삭제 대신 보관 해제를 쓰세요');
   const live = ids.filter(id => byId(id)?.live);
   if (live.length && !confirm(`최근 5분 안에 기록된 세션 ${live.length}개가 있습니다.\n진행 중인 대화라면 Claude Code 가 파일을 다시 만들 수 있습니다. 그래도 삭제할까요?`)) return;
-  await each(ids, 'trash', id => ({ force: live.includes(id) }));
-  await afterChange(`삭제됨 ${ids.length}개`, () => restoreIds(ids).catch(fail));
+  const r = await each(ids, 'trash', id => ({ force: live.includes(id) }));
+  await afterChange(summary('삭제됨', r), r.done.length ? () => restoreIds(r.done).catch(fail) : null);
 }
-async function restoreIds(ids) { await each(ids, 'restore'); await afterChange(`복원 ${ids.length}개`); }
+async function restoreIds(ids) { await afterChange(summary('복원', await each(ids, 'restore'))); }
 async function purgeIds(ids) {
   if (!confirm(`${ids.length}개 세션을 영구 삭제합니다. 되돌릴 수 없습니다.`)) return;
-  await each(ids, 'purge');
-  await afterChange(`영구 삭제 ${ids.length}개`);
+  await afterChange(summary('영구 삭제', await each(ids, 'purge')));
 }
 async function reviveId(id) { await post(id, 'revive'); await afterChange('되살렸습니다 — 이제 claude --resume 가능'); }
 async function unarchiveId(id) {
